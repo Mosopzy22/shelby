@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Shelby Vault — Decentralized File Storage</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
+    body {
+      background: #0A0A0F;
+      color: #E8E8F0;
+      font-family: 'Syne', sans-serif;
+      min-height: 100vh;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.7; transform: scale(0.9); }
+    }
+    @keyframes pulse-ring {
+      0% { transform: scale(0.8); opacity: 0.8; }
+      100% { transform: scale(2.2); opacity: 0; }
+    }
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(16px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #0A0A0F; }
+    ::-webkit-scrollbar-thumb { background: #3A3A52; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useRef, useCallback } = React;
+
+    const C = {
+      orange: "#FF6B35",
+      dark:   "#0A0A0F",
+      card:   "#111118",
+      border: "#1E1E2E",
+      muted:  "#3A3A52",
+      text:   "#E8E8F0",
+      dim:    "#7A7A9A",
+      green:  "#22C55E",
+    };
+
+    // ── Simulated SDK layer ──────────────────────────────────────────────────────
+    // Real integration: import { ShelbyClient } from '@shelby-protocol/sdk/browser'
+    //                   const client = new ShelbyClient({ network, apiKey })
+    //                   await client.uploadBlob(file)
+    const simulateUpload = (file, onProgress) =>
+      new Promise((resolve) => {
+        let p = 0;
+        const iv = setInterval(() => {
+          p += Math.random() * 18 + 5;
+          if (p >= 100) {
+            p = 100; clearInterval(iv); onProgress(100);
+            setTimeout(() => resolve({
+              blobId:     "0x" + [...Array(40)].map(() => Math.floor(Math.random()*16).toString(16)).join(""),
+              txHash:     "0x" + [...Array(64)].map(() => Math.floor(Math.random()*16).toString(16)).join(""),
+              name:       file.name,
+              size:       file.size,
+              type:       file.type || "application/octet-stream",
+              chunks:     Math.ceil(file.size / (256 * 1024)) || 1,
+              uploadedAt: new Date().toISOString(),
+              network:    "shelbynet",
+            }), 300);
+          } else { onProgress(p); }
+        }, 120);
+      });
+
+    // ── Helpers ──────────────────────────────────────────────────────────────────
+    const fmt = (b) => {
+      if (!b) return "0 B";
+      const k = 1024, s = ["B","KB","MB","GB"], i = Math.floor(Math.log(b)/Math.log(k));
+      return `${parseFloat((b/Math.pow(k,i)).toFixed(1))} ${s[i]}`;
+    };
+    const fmtDate = (iso) => new Date(iso).toLocaleDateString("en-US",{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"});
+    const trunc   = (s, a=6, b=4) => s ? `${s.slice(0,a)}…${s.slice(-b)}` : "";
+    const icon    = (t) => t.startsWith("image/")?"🖼":t.startsWith("video/")?"🎬":t.startsWith("audio/")?"🎵":t.includes("pdf")?"📄":t.includes("zip")||t.includes("tar")?"📦":t.includes("text")||t.includes("json")?"📝":"📁";
+
+    // ── UI Components ────────────────────────────────────────────────────────────
+    const Tag = ({children, color=C.orange}) => (
+      <span style={{display:"inline-block",padding:"2px 8px",borderRadius:4,fontSize:10,fontWeight:700,
+        letterSpacing:"0.08em",textTransform:"uppercase",border:`1px solid ${color}40`,color,background:`${color}12`}}>
+        {children}
+      </span>
+    );
+
+    const Pulse = () => (
+      <div style={{display:"flex",alignItems:"center",gap:6}}>
+        <div style={{position:"relative",width:8,height:8}}>
+          <div style={{position:"absolute",inset:0,borderRadius:"50%",background:C.green,animation:"pulse 2s infinite"}}/>
+          <div style={{position:"absolute",inset:-3,borderRadius:"50%",background:C.green+"22",animation:"pulse-ring 2s infinite"}}/>
+        </div>
+        <span style={{color:C.green,fontSize:11,fontWeight:600}}>shelbynet</span>
+      </div>
+    );
+
+    const Bar = ({v}) => (
+      <div style={{width:"100%",height:3,background:C.muted,borderRadius:2,overflow:"hidden",marginTop:8}}>
+        <div style={{height:"100%",width:`${v}%`,background:`linear-gradient(90deg,${C.orange},#FF9A6C)`,
+          borderRadius:2,transition:"width 0.15s ease",boxShadow:`0 0 8px ${C.orange}80`}}/>
+      </div>
+    );
+
+    const BlobCard = ({blob, onCopy, copied}) => {
+      const [hov, setHov] = useState(false);
+      return (
+        <div onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
+          style={{background:C.card,border:`1px solid ${hov?C.muted:C.border}`,borderRadius:12,
+            padding:"16px 18px",display:"flex",flexDirection:"column",gap:12,transition:"border-color 0.2s"}}>
+
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+            <div style={{display:"flex",gap:10,alignItems:"center"}}>
+              <span style={{fontSize:22}}>{icon(blob.type)}</span>
+              <div>
+                <div style={{color:C.text,fontWeight:600,fontSize:13,maxWidth:180,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                  {blob.name}
+                </div>
+                <div style={{color:C.dim,fontSize:11,marginTop:2}}>{fmt(blob.size)} · {blob.chunks} chunk{blob.chunks!==1?"s":""}</div>
+              </div>
+            </div>
+            <Tag>stored</Tag>
+          </div>
+
+          <div style={{background:C.dark,borderRadius:8,padding:"8px 12px",display:"flex",
+            justifyContent:"space-between",alignItems:"center",border:`1px solid ${C.border}`}}>
+            <div>
+              <div style={{color:C.dim,fontSize:10,fontWeight:600,letterSpacing:"0.06em",marginBottom:3}}>BLOB ID</div>
+              <div style={{color:C.orange,fontFamily:"'JetBrains Mono',monospace",fontSize:12}}>{trunc(blob.blobId,10,6)}</div>
+            </div>
+            <button onClick={()=>onCopy(blob.blobId)} style={{
+              background: copied===blob.blobId ? C.green+"22" : `${C.orange}15`,
+              border: `1px solid ${copied===blob.blobId ? C.green+"40" : C.orange+"30"}`,
+              color: copied===blob.blobId ? C.green : C.orange,
+              borderRadius:6,padding:"4px 10px",fontSize:11,fontWeight:600,cursor:"pointer",
+              transition:"all 0.2s",fontFamily:"'Syne',sans-serif"}}>
+              {copied===blob.blobId ? "✓ Copied" : "Copy"}
+            </button>
+          </div>
+
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            <div style={{flex:1,minWidth:120}}>
+              <div style={{color:C.dim,fontSize:10,fontWeight:600,letterSpacing:"0.06em",marginBottom:3}}>TX HASH</div>
+              <div style={{color:C.dim,fontFamily:"'JetBrains Mono',monospace",fontSize:11}}>{trunc(blob.txHash,8,6)}</div>
+            </div>
+            <div>
+              <div style={{color:C.dim,fontSize:10,fontWeight:600,letterSpacing:"0.06em",marginBottom:3}}>UPLOADED</div>
+              <div style={{color:C.dim,fontSize:11}}>{fmtDate(blob.uploadedAt)}</div>
+            </div>
+          </div>
+
+          <a href={`https://explorer.shelby.xyz/shelbynet/blob/${blob.blobId}`} target="_blank" rel="noreferrer"
+            style={{display:"block",textAlign:"center",padding:"7px 0",borderRadius:8,fontSize:12,fontWeight:600,
+              color:C.orange,border:`1px solid ${C.orange}30`,background:`${C.orange}10`,textDecoration:"none"}}>
+            View on Explorer ↗
+          </a>
+        </div>
+      );
+    };
+
+    // ── Main App ─────────────────────────────────────────────────────────────────
+    function App() {
+      const [blobs,      setBlobs]      = useState([]);
+      const [uploading,  setUploading]  = useState(false);
+      const [queue,      setQueue]      = useState([]);
+      const [dragging,   setDragging]   = useState(false);
+      const [copied,     setCopied]     = useState(null);
+      const [apiKey,     setApiKey]     = useState("");
+      const [showKey,    setShowKey]    = useState(false);
+      const fileRef = useRef();
+
+      const handleFiles = useCallback(async (files) => {
+        const list = [...files]; if (!list.length) return;
+        setUploading(true);
+        setQueue(list.map(f => ({ name:f.name, progress:0, done:false })));
+        const results = [];
+        for (let i = 0; i < list.length; i++) {
+          const blob = await simulateUpload(list[i], p =>
+            setQueue(q => q.map((item,idx) => idx===i ? {...item,progress:p} : item))
+          );
+          setQueue(q => q.map((item,idx) => idx===i ? {...item,done:true} : item));
+          results.push(blob);
+        }
+        setBlobs(prev => [...results, ...prev]);
+        setUploading(false);
+        setTimeout(() => setQueue([]), 1200);
+      }, []);
+
+      const handleDrop = e => { e.preventDefault(); setDragging(false); handleFiles(e.dataTransfer.files); };
+      const handleCopy = txt => { navigator.clipboard.writeText(txt); setCopied(txt); setTimeout(()=>setCopied(null),2000); };
+
+      const totalSize = blobs.reduce((s,b) => s+b.size, 0);
+      const corners   = [{top:8,left:8},{top:8,right:8},{bottom:8,left:8},{bottom:8,right:8}];
+
+      return (
+        <div style={{maxWidth:820,margin:"0 auto",padding:"28px 20px 60px"}}>
+
+          {/* Header */}
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+            marginBottom:36,animation:"fadeUp 0.4s ease"}}>
+            <div>
+              <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:4}}>
+                <div style={{width:32,height:32,borderRadius:8,
+                  background:`linear-gradient(135deg,${C.orange},#FF9A6C)`,
+                  display:"flex",alignItems:"center",justifyContent:"center",
+                  fontSize:16,fontWeight:800,color:"#fff"}}>S</div>
+                <h1 style={{fontSize:22,fontWeight:800,letterSpacing:"-0.02em"}}>Shelby Vault</h1>
+              </div>
+              <p style={{color:C.dim,fontSize:13}}>
+                Decentralized file storage on Aptos · Erasure-coded · Censorship-resistant
+              </p>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:8}}>
+              <Pulse/>
+              <button onClick={()=>setShowKey(!showKey)} style={{
+                background:"transparent",border:`1px solid ${C.border}`,color:C.dim,
+                borderRadius:6,padding:"4px 10px",fontSize:11,cursor:"pointer",fontFamily:"'Syne',sans-serif"}}>
+                {apiKey ? "🔑 API Key set" : "+ API Key"}
+              </button>
+            </div>
+          </div>
+
+          {/* API Key */}
+          {showKey && (
+            <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,
+              padding:16,marginBottom:20,animation:"fadeUp 0.25s ease"}}>
+              <label style={{color:C.dim,fontSize:11,fontWeight:600,letterSpacing:"0.06em"}}>
+                APTOS LABS API KEY (optional — avoids rate limits)
+              </label>
+              <div style={{display:"flex",gap:8,marginTop:8}}>
+                <input type="password" value={apiKey} onChange={e=>setApiKey(e.target.value)}
+                  placeholder="aptoslabs_***" style={{
+                    flex:1,background:C.dark,border:`1px solid ${C.border}`,borderRadius:8,
+                    padding:"8px 12px",color:C.text,fontSize:13,
+                    fontFamily:"'JetBrains Mono',monospace",outline:"none"}}/>
+                <button onClick={()=>setShowKey(false)} style={{
+                  background:`${C.orange}20`,border:`1px solid ${C.orange}40`,color:C.orange,
+                  borderRadius:8,padding:"8px 16px",fontSize:13,fontWeight:600,cursor:"pointer",
+                  fontFamily:"'Syne',sans-serif"}}>Save</button>
+              </div>
+            </div>
+          )}
+
+          {/* Stats bar */}
+          {blobs.length > 0 && (
+            <div style={{display:"flex",gap:1,marginBottom:24,background:C.border,
+              borderRadius:12,overflow:"hidden",animation:"fadeUp 0.3s ease"}}>
+              {[
+                {label:"BLOBS STORED", value:blobs.length},
+                {label:"TOTAL SIZE",   value:fmt(totalSize)},
+                {label:"NETWORK",      value:"shelbynet"},
+                {label:"REDUNDANCY",   value:"Erasure 2/3"},
+              ].map((s,i) => (
+                <div key={i} style={{flex:1,background:C.card,padding:"12px 16px"}}>
+                  <div style={{color:C.dim,fontSize:10,fontWeight:600,letterSpacing:"0.07em",marginBottom:4}}>{s.label}</div>
+                  <div style={{color:C.text,fontWeight:700,fontSize:15}}>{s.value}</div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Drop zone */}
+          <div onDragOver={e=>{e.preventDefault();setDragging(true);}}
+            onDragLeave={()=>setDragging(false)} onDrop={handleDrop}
+            onClick={()=>!uploading&&fileRef.current.click()}
+            style={{border:`2px dashed ${dragging?C.orange:C.border}`,borderRadius:16,
+              padding:"44px 24px",textAlign:"center",cursor:uploading?"default":"pointer",
+              background:dragging?`${C.orange}08`:C.card,transition:"all 0.25s ease",
+              marginBottom:28,animation:"fadeUp 0.5s ease",position:"relative",overflow:"hidden"}}>
+
+            {corners.map((pos,i) => (
+              <div key={i} style={{position:"absolute",width:12,height:12,
+                borderColor:dragging?C.orange:C.muted,borderStyle:"solid",borderWidth:0,
+                borderTopWidth:   pos.top    !==undefined?2:0,
+                borderBottomWidth:pos.bottom !==undefined?2:0,
+                borderLeftWidth:  pos.left   !==undefined?2:0,
+                borderRightWidth: pos.right  !==undefined?2:0,
+                transition:"border-color 0.25s",...pos}}/>
+            ))}
+
+            {uploading ? (
+              <div>
+                <div style={{color:C.text,fontWeight:700,fontSize:15,marginBottom:20}}>Uploading to Shelby…</div>
+                {queue.map((item,i) => (
+                  <div key={i} style={{marginBottom:14,textAlign:"left",maxWidth:400,margin:"0 auto 14px"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                      <span style={{color:C.text,fontSize:12,fontWeight:500}}>{item.name}</span>
+                      <span style={{color:item.done?C.green:C.orange,fontSize:12,fontWeight:600}}>
+                        {item.done?"✓ Done":`${Math.round(item.progress)}%`}
+                      </span>
+                    </div>
+                    <Bar v={item.progress}/>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <>
+                <div style={{width:56,height:56,borderRadius:14,background:`${C.orange}15`,
+                  border:`1px solid ${C.orange}30`,display:"flex",alignItems:"center",
+                  justifyContent:"center",fontSize:24,margin:"0 auto 16px"}}>☁</div>
+                <div style={{color:C.text,fontWeight:700,fontSize:16,marginBottom:8}}>
+                  Drop files to store on Shelby
+                </div>
+                <div style={{color:C.dim,fontSize:13}}>
+                  or <span style={{color:C.orange,fontWeight:600}}>click to browse</span> · Any file type · Any size
+                </div>
+                <div style={{marginTop:20,display:"flex",justifyContent:"center",gap:8,flexWrap:"wrap"}}>
+                  {["Erasure Coded","Aptos Verified","Decentralized"].map(f=><Tag key={f}>{f}</Tag>)}
+                </div>
+              </>
+            )}
+            <input ref={fileRef} type="file" multiple onChange={e=>handleFiles(e.target.files)} style={{display:"none"}}/>
+          </div>
+
+          {/* Blob list */}
+          {blobs.length > 0 && (
+            <div style={{animation:"fadeUp 0.4s ease"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+                <h2 style={{fontSize:14,fontWeight:700,color:C.dim,letterSpacing:"0.08em"}}>STORED BLOBS</h2>
+                <span style={{color:C.dim,fontSize:12}}>{blobs.length} file{blobs.length!==1?"s":""}</span>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:12}}>
+                {blobs.map((blob,i) => (
+                  <div key={blob.blobId} style={{animation:`fadeUp 0.3s ease ${i*0.05}s both`}}>
+                    <BlobCard blob={blob} onCopy={handleCopy} copied={copied}/>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {blobs.length===0 && !uploading && (
+            <div style={{textAlign:"center",color:C.muted,fontSize:13,padding:"8px 0 24px",animation:"fadeUp 0.6s ease"}}>
+              Your stored blobs will appear here after upload.
+            </div>
+          )}
+
+          {/* Footer */}
+          <div style={{marginTop:48,paddingTop:20,borderTop:`1px solid ${C.border}`,
+            display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+            <div style={{color:C.muted,fontSize:11}}>
+              Built with{" "}
+              <code style={{fontFamily:"'JetBrains Mono',monospace",color:C.orange,
+                background:`${C.orange}12`,padding:"1px 5px",borderRadius:4,fontSize:11}}>
+                @shelby-protocol/sdk
+              </code>
+              {" "}·{" "}
+              <code style={{fontFamily:"'JetBrains Mono',monospace",color:C.dim,
+                background:C.border,padding:"1px 5px",borderRadius:4,fontSize:11}}>
+                @aptos-labs/ts-sdk
+              </code>
+            </div>
+            <a href="https://docs.shelby.xyz" target="_blank" rel="noreferrer"
+              style={{color:C.muted,fontSize:11,textDecoration:"none"}}>docs.shelby.xyz ↗</a>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+  </script>
+</body>
+</html>
